@@ -3,8 +3,11 @@ use solana_sdk::pubkey::Pubkey;
 use dac_client::programs::DAC_ID;
 
 pub fn derive_network_config_pda() -> Result<(Pubkey, u8)> {
-    Pubkey::try_find_program_address(&[b"dac_network_config"], &DAC_ID)
-        .ok_or_else(|| anyhow::anyhow!("Failed to derive network config PDA"))
+    Pubkey::try_find_program_address(
+        &[b"dac_network_config"],
+        &DAC_ID,
+    )
+    .ok_or_else(|| anyhow::anyhow!("Failed to derive network config PDA"))
 }
 
 pub fn derive_node_info_pda(node_pubkey: &Pubkey) -> Result<(Pubkey, u8)> {

@@ -1,3 +1,7 @@
 id.json
+*-keypair.json
+keypairs.json
 .env
 target
+
+docs/

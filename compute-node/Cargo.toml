@@ -1,0 +1,16 @@
+[package]
+name = "dac-compute-node"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dac-compute-node"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+solana-sdk = { workspace = true }
+dac-sdk = { path = "../dac-sdk" }
+dotenvy = "0.15"
+serde_json = "1.0"
