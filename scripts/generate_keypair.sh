@@ -1,24 +1,58 @@
 #!/bin/bash
 
-# Generate keypair for compute node
-# This script generates a Solana keypair and saves it to id.json
+# Generate keypairs for compute node and validator node
+# This script generates Solana keypairs and saves them to the agent-network root folder
 
 set -e
 
-KEYPAIR_PATH="${1:-/home/equilibrium/repos/turbine-course/sol-mind-protocol/nodes/compute-node/id.json}"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get the agent-network root directory (parent of scripts)
+AGENT_NETWORK_ROOT="$(dirname "$SCRIPT_DIR")"
 
-echo "Generating keypair for compute node..."
+# Keypair paths relative to agent-network root
+COMPUTE_KEYPAIR_PATH="$AGENT_NETWORK_ROOT/compute-node-keypair.json"
+VALIDATOR_KEYPAIR_PATH="$AGENT_NETWORK_ROOT/validator-node-keypair.json"
+KEYPAIRS_JSON_PATH="$AGENT_NETWORK_ROOT/keypairs.json"
 
-# Generate keypair using Solana CLI
-solana-keygen new --outfile "$KEYPAIR_PATH" --no-bip39-passphrase --force
-
-# Extract pubkey from the keypair file
-PUBKEY=$(solana-keygen pubkey "$KEYPAIR_PATH")
-
+echo "Generating keypairs for compute node and validator node..."
+echo "Agent network root: $AGENT_NETWORK_ROOT"
 echo ""
-echo "Generated keypair for compute node:"
-echo "Pubkey: $PUBKEY"
-echo "Keypair saved to: $KEYPAIR_PATH"
+
+# Generate compute node keypair
+echo "Generating compute node keypair..."
+solana-keygen new --outfile "$COMPUTE_KEYPAIR_PATH" --no-bip39-passphrase --force
+COMPUTE_PUBKEY=$(solana-keygen pubkey "$COMPUTE_KEYPAIR_PATH")
+echo "Compute node pubkey: $COMPUTE_PUBKEY"
 echo ""
-echo "The keypair file contains both public and private key."
+
+# Generate validator node keypair
+echo "Generating validator node keypair..."
+solana-keygen new --outfile "$VALIDATOR_KEYPAIR_PATH" --no-bip39-passphrase --force
+VALIDATOR_PUBKEY=$(solana-keygen pubkey "$VALIDATOR_KEYPAIR_PATH")
+echo "Validator node pubkey: $VALIDATOR_PUBKEY"
+echo ""
+
+# Create JSON file with pubkeys
+cat > "$KEYPAIRS_JSON_PATH" << EOF
+{
+  "compute_node": {
+    "pubkey": "$COMPUTE_PUBKEY",
+    "keypair_path": "compute-node-keypair.json"
+  },
+  "validator_node": {
+    "pubkey": "$VALIDATOR_PUBKEY",
+    "keypair_path": "validator-node-keypair.json"
+  }
+}
+EOF
+
+echo "Generated keypairs:"
+echo "  Compute node: $COMPUTE_KEYPAIR_PATH"
+echo "  Validator node: $VALIDATOR_KEYPAIR_PATH"
+echo "  Keypairs JSON: $KEYPAIRS_JSON_PATH"
+echo ""
+echo "Keypair addresses saved to: $KEYPAIRS_JSON_PATH"
+echo ""
+echo "The keypair files contain both public and private keys."
 

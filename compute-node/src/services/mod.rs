@@ -1,5 +1,5 @@
-mod node_registry;
+mod node_claim;
 mod agent;
 
-pub use node_registry::NodeRegistryService;
+pub use node_claim::NodeClaimService;
 pub use agent::AgentService;
