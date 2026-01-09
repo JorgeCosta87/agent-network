@@ -17,11 +17,7 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use base64::Engine;
 
-#[derive(Clone, Debug)]
-pub struct AccountFilter {
-    pub offset: usize,
-    pub value: Vec<u8>,
-}
+use crate::types::AccountFilter;
 
 pub struct SolanaAdapter {
     client: Arc<RpcClient>,
@@ -30,8 +26,8 @@ pub struct SolanaAdapter {
 }
 
 impl SolanaAdapter {
-    pub async fn new(rpc_url: String, rpc_websocket_url: String, keypair: Keypair) -> Arc<Self> {
-        Arc::new(Self {
+    pub async fn new(rpc_url: String, rpc_websocket_url: String, keypair: Keypair) -> Self {
+        Self {
             client: Arc::new(
                 RpcClient::new_with_commitment(
                     rpc_url,
@@ -45,7 +41,7 @@ impl SolanaAdapter {
                 }
             }),
             keypair,
-        })
+        }
     }
 
     pub fn payer_pubkey(&self) -> Pubkey {
