@@ -4,10 +4,11 @@ members = [
     "dac-sdk",
     "compute-node",
     "validator-node",
+    "ipfs-adapter",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+anyhow = "1.0.100"
 tokio = { version = "1.49.0", features = ["full"] }
 solana-sdk = "3.0.0"
-anyhow = "1.0.100"
