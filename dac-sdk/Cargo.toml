@@ -1,0 +1,16 @@
+[package]
+name = "dac-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dac_sdk"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+solana-sdk = { workspace = true }
+solana-adapter = { path = "../solana-adapter" }
+dac-client = { path = "../../clients/rust" }
+borsh = "1.6.0"

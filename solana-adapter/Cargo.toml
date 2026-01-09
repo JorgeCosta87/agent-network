@@ -1,0 +1,18 @@
+[package]
+name = "solana-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "solana_adapter"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+solana-sdk = { workspace = true }
+solana-client = "3.1.4"
+solana-account-decoder = "3.1.4"
+solana-commitment-config = "3.1.0"
+tokio-stream = "0.1.18"
+base64 = "0.22"
