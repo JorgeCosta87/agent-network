@@ -17,6 +17,7 @@ use dac_client::{
         SetGoalBuilder, ContributeToGoalBuilder, WithdrawFromGoalBuilder,
         SubmitTaskValidationBuilder, ValidateAgentBuilder,
         ValidateComputeNodeBuilder, InitializeNetworkBuilder,
+        UpdateNetworkConfigBuilder,
     },
     types::{NodeType, TaskStatus, AgentStatus, GoalStatus, NodeStatus},
     programs::DAC_ID,
@@ -172,6 +173,34 @@ impl DacClient {
             .allocate_tasks(allocate_tasks)
             .approved_code_measurements(approved_code_measurements)
             .instruction();
+
+        self.adapter
+            .send_and_confirm_transaction(&[instruction])
+            .await
+    }
+
+    pub async fn update_network_config(
+        &self,
+        authority: &Pubkey,
+        cid_config: Option<String>,
+        new_code_measurement: Option<dac_client::types::CodeMeasurement>,
+    ) -> Result<String> {
+        let network_config = self.derive_network_config_pda()?;
+
+        let mut builder = UpdateNetworkConfigBuilder::new();
+        builder
+            .authority(*authority)
+            .network_config(network_config);
+
+        if let Some(cid) = cid_config {
+            builder.cid_config(cid);
+        }
+
+        if let Some(measurement) = new_code_measurement {
+            builder.new_code_measurement(measurement);
+        }
+
+        let instruction = builder.instruction();
 
         self.adapter
             .send_and_confirm_transaction(&[instruction])
