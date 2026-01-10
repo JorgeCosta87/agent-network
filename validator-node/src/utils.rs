@@ -13,6 +13,16 @@ pub struct ValidateComputeNodeMessage {
     pub approved: bool,
 }
 
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct SubmitTaskValidationMessage {
+    pub goal_id: u64,
+    pub task_slot_id: u64,
+    pub payment_amount: u64,
+    pub validation_proof: [u8; 32],
+    pub approved: bool,
+    pub goal_completed: bool,
+}
+
 pub fn create_ed25519_instruction_with_signature(
     message: &[u8],
     key_pair: &Keypair,

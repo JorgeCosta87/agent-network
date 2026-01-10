@@ -13,4 +13,6 @@ tokio = { workspace = true }
 solana-sdk = { workspace = true }
 solana-adapter = { path = "../solana-adapter" }
 dac-client = { path = "../../clients/rust" }
+dac-common = { path = "../dac-common" }
+ipfs-adapter = { path = "../ipfs-adapter" }
 borsh = "1.6.0"

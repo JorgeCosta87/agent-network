@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use config::Config;
 use dac_sdk::SolanaAdapter;
+use ipfs_adapter::IpfsClient;
 use services::{TeeService, ValidatorService};
 use tokio_util::sync::CancellationToken;
 
@@ -26,11 +27,15 @@ async fn main() -> Result<()> {
 
     startup_checks(&config, &solana_adapter).await?;
 
+    let ipfs_client = Arc::new(IpfsClient::new(&config.ipfs_api_url));
+    println!("IPFS client initialized: {}", config.ipfs_api_url);
+
     let tee_service = Arc::new(TeeService::new());
     tee_service.initialize()?;
 
     let validator_service = Arc::new(ValidatorService::new(
         Arc::clone(&solana_adapter),
+        Arc::clone(&ipfs_client),
         Arc::clone(&tee_service),
         config.network_authority,
         config.node_pubkey(),
@@ -71,7 +76,18 @@ async fn main() -> Result<()> {
         }
     });
 
-    println!("Validator node ready. Monitoring for compute nodes and agents to validate...");
+    // Spawn task validation loop
+    let task_validation_handle = tokio::spawn({
+        let token = shutdown_token.clone();
+        let service = Arc::clone(&validator_service);
+        async move {
+            if let Err(e) = service.run_task_validation_loop(token).await {
+                eprintln!("Task validation loop error: {}", e);
+            }
+        }
+    });
+
+    println!("Validator node ready. Monitoring for compute nodes, agents, and tasks to validate...");
     println!("Press Ctrl+C to shutdown.");
 
     tokio::select! {
@@ -83,6 +99,9 @@ async fn main() -> Result<()> {
         }
         _ = agent_validation_handle => {
             println!("Agent validation task ended unexpectedly");
+        }
+        _ = task_validation_handle => {
+            println!("Task validation task ended unexpectedly");
         }
     }
 

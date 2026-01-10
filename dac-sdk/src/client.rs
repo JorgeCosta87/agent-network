@@ -27,15 +27,24 @@ use crate::pdas;
 
 pub struct DacClient {
     adapter: Arc<SolanaAdapter>,
+    authority: Pubkey,
 }
 
 impl DacClient {
-    pub fn new(adapter: Arc<SolanaAdapter>) -> Self {
-        Self { adapter }
+    pub fn new(adapter: Arc<SolanaAdapter>, authority: Pubkey) -> Self {
+        Self { 
+            adapter,
+            authority,
+        }
+    }
+
+    fn get_authority(&self) -> Result<&Pubkey> {
+        Ok(&self.authority)
     }
 
     pub fn derive_network_config_pda(&self) -> Result<Pubkey> {
-        Ok(pdas::derive_network_config_pda()?.0)
+        let authority = self.get_authority()?;
+        Ok(pdas::derive_network_config_pda(&authority)?.0)
     }
 
     pub fn derive_node_info_pda(&self, node_pubkey: &Pubkey) -> Result<Pubkey> {
@@ -67,7 +76,8 @@ impl DacClient {
     }
 
     pub async fn get_network_config(&self) -> Result<Option<NetworkConfig>> {
-        let pda = self.derive_network_config_pda()?;
+        let authority = self.get_authority()?;
+        let pda = pdas::derive_network_config_pda(&authority)?.0;
         self.adapter
             .get_account(&pda, NetworkConfig::from_bytes)
             .await
@@ -78,6 +88,47 @@ impl DacClient {
         self.adapter
             .get_account(&pda, NodeInfo::from_bytes)
             .await
+    }
+
+    pub async fn get_all_compute_node_by_status_and_type(&self, status: NodeStatus, node_type: NodeType) -> Result<impl Iterator<Item = NodeInfo>> {
+        let filters = vec![
+            AccountFilter {
+                offset: 0,
+                value: NODE_INFO_DISCRIMINATOR.to_vec(),
+            },
+            AccountFilter {
+                offset: 72, // discriminator 8 + owner 32 + node_pubkey 32
+                value: vec![node_type as u8],
+            },
+            AccountFilter {
+                offset: 73, // discriminator 8 + owner 32 + node_pubkey 32 + node_type 1
+                value: vec![status as u8],
+            },
+     
+        ];
+        let accounts = self.adapter
+            .get_program_accounts(&DAC_ID, filters, NodeInfo::from_bytes)
+            .await?.into_iter().map(|(_, node_info)| node_info);
+        
+        Ok(accounts)
+    }
+
+    pub async fn get_all_agents_by_status(&self, status: AgentStatus) -> Result<impl Iterator<Item = Agent>> {
+        let filters = vec![
+            AccountFilter {
+                offset: 0,
+                value: AGENT_DISCRIMINATOR.to_vec(),
+            },
+            AccountFilter {
+                offset: 48, // discriminator 8 + agent_slot_id 8 + owner 32
+                value: vec![status as u8],
+            },
+        ];
+        let accounts = self.adapter
+            .get_program_accounts(&DAC_ID, filters, Agent::from_bytes)
+            .await?.into_iter().map(|(_, agent)| agent);
+        
+        Ok(accounts)
     }
 
     pub async fn get_agent(&self, network_config: &Pubkey, agent_slot_id: u64) -> Result<Option<Agent>> {
@@ -162,7 +213,7 @@ impl DacClient {
         allocate_tasks: u64,
         approved_code_measurements: Vec<dac_client::types::CodeMeasurement>,
     ) -> Result<String> {
-        let network_config = self.derive_network_config_pda()?;
+        let network_config = pdas::derive_network_config_pda(authority)?.0;
 
         let instruction = InitializeNetworkBuilder::new()
             .authority(*authority)
@@ -185,7 +236,7 @@ impl DacClient {
         cid_config: Option<String>,
         new_code_measurement: Option<dac_client::types::CodeMeasurement>,
     ) -> Result<String> {
-        let network_config = self.derive_network_config_pda()?;
+        let network_config = pdas::derive_network_config_pda(authority)?.0;
 
         let mut builder = UpdateNetworkConfigBuilder::new();
         builder
@@ -395,6 +446,7 @@ impl DacClient {
         task_slot_id: u64,
         input_cid: String,
         output_cid: String,
+        next_input_cid: String,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let task = self.derive_task_pda(&network_config, task_slot_id)?;
@@ -405,6 +457,7 @@ impl DacClient {
             .task(task)
             .input_cid(input_cid)
             .output_cid(output_cid)
+            .next_input_cid(next_input_cid)
             .instruction();
 
         self.adapter
@@ -417,6 +470,7 @@ impl DacClient {
         validator_pubkey: &Pubkey,
         goal_slot_id: u64,
         task_slot_id: u64,
+        ed25519_instruction: solana_sdk::instruction::Instruction,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let validator_node_info = self.derive_node_info_pda(validator_pubkey)?;
@@ -445,7 +499,7 @@ impl DacClient {
             .instruction();
 
         self.adapter
-            .send_and_confirm_transaction(&[instruction])
+            .send_and_confirm_transaction(&[ed25519_instruction, instruction])
             .await
     }
 
@@ -472,12 +526,13 @@ impl DacClient {
         &self,
         validator_pubkey: &Pubkey,
         compute_node_pubkey: &Pubkey,
+        ed25519_instruction: solana_sdk::instruction::Instruction,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let validator_node_info = self.derive_node_info_pda(validator_pubkey)?;
         let compute_node_info = self.derive_node_info_pda(compute_node_pubkey)?;
 
-        let instruction = ValidateComputeNodeBuilder::new()
+        let validate_instruction = ValidateComputeNodeBuilder::new()
             .validator_node_pubkey(*validator_pubkey)
             .validator_node_info(validator_node_info)
             .compute_node_info(compute_node_info)
@@ -485,14 +540,16 @@ impl DacClient {
             .instruction_sysvar(solana_sdk::pubkey!("Sysvar1nstructions1111111111111111111111111"))
             .instruction();
 
+        // Ed25519 instruction must come before validate_compute_node instruction
         self.adapter
-            .send_and_confirm_transaction(&[instruction])
+            .send_and_confirm_transaction(&[ed25519_instruction, validate_instruction])
             .await
     }
 
     pub fn subscribe_to_node_info(
         &self,
-        node_pubkey: &Pubkey,
+        node_pubkey: Option<&Pubkey>,
+        node_type: Option<NodeType>,
         status: Option<NodeStatus>,
         tx: mpsc::Sender<NodeInfo>,
     ) -> Result<tokio::task::JoinHandle<()>> {
@@ -501,11 +558,21 @@ impl DacClient {
                 offset: 0,
                 value: NODE_INFO_DISCRIMINATOR.to_vec(),
             },
-            AccountFilter {
+        ];
+
+        if let Some(node_pubkey) = node_pubkey {
+            filters.push(AccountFilter {
                 offset: 40, // discriminator 8 + owner 32
                 value: node_pubkey.to_bytes().to_vec(),
-            },
-        ];
+            });
+        }
+
+        if let Some(node_type) = node_type {
+            filters.push(AccountFilter {
+                offset: 72, // discriminator 8 + owner 32 + node_pubkey 32
+                value: vec![node_type as u8],
+            });
+        }
 
         if let Some(status) = status {
             let status_byte = status as u8;
@@ -603,5 +670,104 @@ impl DacClient {
             tx,
             "goals",
         )
+    }
+
+    pub async fn get_task_by_slot(&self, network_authority: &Pubkey, task_slot_id: u64) -> Result<Task> {
+        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
+        self.get_task(&network_config, task_slot_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Task {} not found", task_slot_id))
+    }
+
+
+    pub async fn get_goal_by_task_slot(&self, network_authority: &Pubkey, task_slot_id: u64) -> Result<(Goal, Pubkey)> {
+        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
+        
+        let task_pubkey = self.derive_task_pda(&network_config, task_slot_id)?;
+        
+        let goals = self.adapter.get_program_accounts(
+            &DAC_ID,
+            vec![
+                AccountFilter {
+                    offset: 0,
+                    value: GOAL_DISCRIMINATOR.to_vec(),
+                },
+                AccountFilter {
+                    offset: 80, // discriminator 8 + goal_slot_id 8 + owner 32 + agent 32
+                    value: task_pubkey.to_bytes().to_vec(),
+                },
+            ],
+            Goal::from_bytes,
+        ).await?;
+        
+        // Should find exactly one goal
+        if goals.len() == 1 {
+            let (goal_pda, goal) = goals.into_iter().next().unwrap();
+            Ok((goal, goal_pda))
+        } else if goals.is_empty() {
+            anyhow::bail!("Goal for task {} not found", task_slot_id)
+        } else {
+            anyhow::bail!("Multiple goals found for task {} (unexpected)", task_slot_id)
+        }
+    }
+
+    pub async fn get_agent_by_pubkey(&self, agent_pubkey: Pubkey) -> Result<Agent> {
+        self.adapter.get_account(&agent_pubkey, Agent::from_bytes).await?
+            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_pubkey))
+    }
+
+    pub async fn claim_task_simple(
+        &self,
+        network_authority: &Pubkey,
+        task_slot_id: u64,
+        max_task_cost: u64,
+    ) -> Result<String> {
+        let compute_node_pubkey = self.adapter.payer_pubkey();
+        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
+        
+        // Derive task PDA to filter by
+        let task_pda = pdas::derive_task_pda(&network_config, task_slot_id)?.0;
+        
+        // Filter goals by task pubkey (offset: discriminator 8 + goal_slot_id 8 + owner 32 + agent 32 = 80)
+        let goals = self.adapter.get_program_accounts(
+            &DAC_ID,
+            vec![
+                AccountFilter {
+                    offset: 0,
+                    value: GOAL_DISCRIMINATOR.to_vec(),
+                },
+                AccountFilter {
+                    offset: 80, // task field offset in Goal struct
+                    value: task_pda.to_bytes().to_vec(),
+                },
+            ],
+            Goal::from_bytes,
+        ).await?;
+        
+        // Should find exactly one goal
+        if goals.is_empty() {
+            anyhow::bail!("Goal for task {} not found", task_slot_id);
+        }
+        
+        if goals.len() > 1 {
+            eprintln!("Warning: Multiple goals found for task {} (unexpected)", task_slot_id);
+        }
+        
+        let (_, goal) = goals.into_iter().next().unwrap();
+        
+        let goal_slot_id = goal.goal_slot_id;
+        
+        self.claim_task(&compute_node_pubkey, goal_slot_id, task_slot_id, max_task_cost).await
+    }
+
+    /// Submit task result (simplified signature for compute nodes)
+    pub async fn submit_task_result_simple(
+        &self,
+        task_slot_id: u64,
+        input_cid: String,
+        output_cid: String,
+        next_input_cid: String,
+    ) -> Result<String> {
+        let compute_node_pubkey = self.adapter.payer_pubkey();
+        self.submit_task_result(&compute_node_pubkey, task_slot_id, input_cid, output_cid, next_input_cid).await
     }
 }

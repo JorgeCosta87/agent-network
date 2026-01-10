@@ -1,25 +1,77 @@
-use anyhow::Result;
-use dac_sdk::{SolanaAdapter, DacClient, types::{NodeType, NodeStatus, AgentStatus}};
+use anyhow::{Result, Context};
+use dac_sdk::{SolanaAdapter, DacClient, types::{NodeType, NodeStatus, AgentStatus, TaskStatus}};
+use ipfs_adapter::IpfsClient;
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::utils::{ValidateComputeNodeMessage, create_ed25519_instruction_with_signature};
+use crate::utils::{ValidateComputeNodeMessage, SubmitTaskValidationMessage, create_ed25519_instruction_with_signature};
 use borsh::BorshSerialize;
+use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
 
 use super::TeeService;
 
+/// Task input data structure (fetched from IPFS)
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskInputData {
+    goal_specification: String,
+    agent_config: String,
+    agent_memory: Option<String>,
+    previous_output: Option<String>,
+}
+
+/// Task output data structure (fetched from IPFS)
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskOutputData {
+    llm_response: String,
+    reasoning: Option<String>,
+    next_action: Option<String>,
+}
+
+/// Task execution snapshot (uploaded to IPFS by validator)
+#[derive(Debug, Serialize, Deserialize)]
+struct TaskExecutionSnapshot {
+    task_slot_id: u64,
+    execution_count: u64,
+    goal_id: u64,
+    agent_pubkey: String,
+    compute_node: Option<String>,
+    input_cid: Option<String>,
+    output_cid: Option<String>,
+    timestamp: i64,
+    chain_proof: String,
+    validation: ValidationInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ValidationInfo {
+    validator_pubkey: String,
+    tee_signature: String,
+    payment_amount: u64,
+    approved: bool,
+}
+
+
 pub struct ValidatorService {
     dac_client: DacClient,
+    ipfs_client: Arc<IpfsClient>,
     tee_service: Arc<TeeService>,
     validator_pubkey: Pubkey,
 }
 
 impl ValidatorService {
-    pub fn new(adapter: Arc<SolanaAdapter>, tee_service: Arc<TeeService>, authority: Pubkey, validator_pubkey: Pubkey) -> Self {
+    pub fn new(
+        adapter: Arc<SolanaAdapter>,
+        ipfs_client: Arc<IpfsClient>,
+        tee_service: Arc<TeeService>,
+        authority: Pubkey,
+        validator_pubkey: Pubkey,
+    ) -> Self {
         let dac_client = DacClient::new(adapter, authority);
         Self {
             dac_client,
+            ipfs_client,
             tee_service,
             validator_pubkey,
         }
@@ -282,5 +334,180 @@ impl ValidatorService {
         self.dac_client
             .validate_agent(validator_pubkey, agent_slot_id)
             .await
+    }
+
+    //TODO: Add actual task execution validation logic (fetch from IPFS, re-execute, etc.)
+    pub async fn validate_task(
+        &self,
+        goal_slot_id: u64,
+        task_slot_id: u64,
+    ) -> Result<String> {
+        let tee_signing_keypair = self.tee_service.get_signing_keypair()?;
+        
+        // Fetch task from chain
+        let network_config = self.dac_client.derive_network_config_pda()?;
+        let task = self.dac_client.get_task(&network_config, task_slot_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
+        
+        // Fetch pending CIDs from task
+        let pending_input_cid = task.pending_input_cid
+            .ok_or_else(|| anyhow::anyhow!("No pending input CID"))?;
+        let pending_output_cid = task.pending_output_cid
+            .ok_or_else(|| anyhow::anyhow!("No pending output CID"))?;
+        
+        println!("Fetching task data from IPFS:");
+        println!("  Input CID: {}", pending_input_cid);
+        println!("  Output CID: {}", pending_output_cid);
+        
+        // Fetch input data from IPFS
+        let input_bytes = self.ipfs_client.cat(&pending_input_cid).await
+            .context("Failed to fetch input from IPFS")?;
+        let input_data: TaskInputData = serde_json::from_slice(&input_bytes)
+            .context("Failed to parse input data")?;
+        
+        // Fetch output data from IPFS
+        let output_bytes = self.ipfs_client.cat(&pending_output_cid).await
+            .context("Failed to fetch output from IPFS")?;
+        let output_data: TaskOutputData = serde_json::from_slice(&output_bytes)
+            .context("Failed to parse output data")?;
+        
+        println!("Task data fetched successfully");
+        println!("  LLM Response length: {} bytes", output_data.llm_response.len());
+        
+        // TODO: Re-execute task in TEE for validation
+        // For now, we just validate that data exists and approve
+        let approved = !output_data.llm_response.is_empty();
+        
+        // TODO: Determine goal completion by analyzing output
+        let goal_completed = false;
+        
+        // Calculate payment based on output size (mock logic)
+        let payment_amount = 1_000_000; // 0.001 SOL
+        
+        // Compute validation_proof = SHA256(pending_input_cid + pending_output_cid)
+        let mut hasher = Sha256::new();
+        hasher.update(pending_input_cid.as_bytes());
+        hasher.update(pending_output_cid.as_bytes());
+        let validation_proof: [u8; 32] = hasher.finalize().into();
+        
+        // Create message
+        let message = SubmitTaskValidationMessage {
+            goal_id: goal_slot_id,
+            task_slot_id,
+            payment_amount,
+            validation_proof,
+            approved,
+            goal_completed,
+        };
+        
+        // Serialize message
+        let mut message_data = Vec::new();
+        message
+            .serialize(&mut message_data)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize task validation message: {}", e))?;
+        
+        // Create Ed25519 instruction
+        let ed25519_instruction = create_ed25519_instruction_with_signature(
+            &message_data,
+            &tee_signing_keypair,
+        );
+        
+        // Create and upload snapshot to IPFS
+        let snapshot = TaskExecutionSnapshot {
+            task_slot_id,
+            execution_count: task.execution_count,
+            goal_id: goal_slot_id,
+            agent_pubkey: task.agent.to_string(),
+            compute_node: task.compute_node.map(|n| n.to_string()),
+            input_cid: Some(pending_input_cid.clone()),
+            output_cid: Some(pending_output_cid.clone()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            chain_proof: hex::encode(task.chain_proof),
+            validation: ValidationInfo {
+                validator_pubkey: self.validator_pubkey.to_string(),
+                tee_signature: hex::encode(&message_data[..32]), // Mock TEE signature
+                payment_amount,
+                approved,
+            },
+        };
+        
+        let snapshot_json = serde_json::to_vec(&snapshot)
+            .context("Failed to serialize snapshot")?;
+        
+        let snapshot_cid = self.ipfs_client.add(snapshot_json).await
+            .context("Failed to upload snapshot to IPFS")?;
+        
+        println!("Snapshot uploaded to IPFS: {}", snapshot_cid);
+        
+        self.ipfs_client.pin(&snapshot_cid).await
+            .context("Failed to pin snapshot")?;
+        
+        // Submit with Ed25519 instruction
+        self.dac_client
+            .submit_task_validation(
+                &self.validator_pubkey,
+                goal_slot_id,
+                task_slot_id,
+                ed25519_instruction,
+            )
+            .await
+    }
+
+    pub async fn run_task_validation_loop(&self, shutdown: CancellationToken) -> Result<()> {
+        println!("Starting monitoring for tasks awaiting validation...");
+        let (tx, mut rx) = mpsc::channel(1);
+        let _subscription = self.dac_client.subscribe_to_tasks(
+            Some(TaskStatus::AwaitingValidation),
+            tx,
+        );
+
+        println!("Monitoring for tasks to validate...");
+        
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Some(task_account) => {
+                            println!("Task awaiting validation: task_slot_id={}", task_account.task_slot_id);
+                            
+                            let network_config = self.dac_client.derive_network_config_pda()?;
+                            let network_config_data = self.dac_client.get_network_config().await?
+                                .ok_or_else(|| anyhow::anyhow!("Network config not found"))?;
+                            
+                            let task_pubkey = self.dac_client.derive_task_pda(&network_config, task_account.task_slot_id)?;
+                            
+                            let mut found_goal_id = None;
+                            for goal_id in 0..network_config_data.goal_count {
+                                if let Ok(Some(goal)) = self.dac_client.get_goal(&network_config, goal_id).await {
+                                    if goal.task == task_pubkey {
+                                        found_goal_id = Some(goal_id);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if let Some(goal_slot_id) = found_goal_id {
+                                println!("Found goal_id={} for task_slot_id={}", goal_slot_id, task_account.task_slot_id);
+                                if let Err(e) = self.validate_task(goal_slot_id, task_account.task_slot_id).await {
+                                    eprintln!("Failed to validate task: {}", e);
+                                }
+                            } else {
+                                eprintln!("Could not find goal for task_slot_id={}", task_account.task_slot_id);
+                            }
+                        }
+                        None => {
+                            anyhow::bail!("Task subscription ended unexpectedly");
+                        }
+                    }
+                }
+                _ = shutdown.cancelled() => {
+                    println!("Task validation loop shutting down...");
+                    return Ok(());
+                }
+            }
+        }
     }
 }

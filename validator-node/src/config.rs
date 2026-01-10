@@ -10,6 +10,7 @@ pub struct Config {
     pub rpc_websocket_url: String,
     pub node_keypair: Keypair,
     pub network_authority: Pubkey,
+    pub ipfs_api_url: String,
 }
 
 impl Config {
@@ -34,12 +35,15 @@ impl Config {
         let network_authority = network_authority.parse::<Pubkey>()
             .map_err(|_| anyhow::anyhow!("Failed to parse NETWORK_AUTHORITY as Pubkey"))?;
 
+        let ipfs_api_url = std::env::var("IPFS_API_URL")
+            .unwrap_or_else(|_| "http://localhost:5001".to_string());
 
         Ok(Config {
             rpc_url,
             rpc_websocket_url,
             node_keypair: keypair,
             network_authority,
+            ipfs_api_url,
         })
     }
 
