@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  ipfs:
+    image: ipfs/kubo:latest
+    container_name: dac-ipfs
+    ports:
+      # API port (for HTTP API calls from nodes)
+      - "5001:5001"
+      # Gateway port (for HTTP gateway access)
+      - "8080:8080"
+      # Swarm port TCP (for P2P networking)
+      - "4001:4001"
+      # Swarm port UDP (for P2P networking)
+      - "4001:4001/udp"
+    volumes:
+      # Persist IPFS data across container restarts
+      - ipfs_data:/data/ipfs
+      - ipfs_staging:/staging
+    environment:
+      - IPFS_PROFILE=server
+      # Allow unrestricted API access (dev only)
+      - IPFS_API_ALLOW_ORIGIN=*
+    networks:
+      - dac-network
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: IPFS Cluster for multi-node redundancy (can add later)
+  # ipfs-cluster:
+  #   image: ipfs/ipfs-cluster:latest
+  #   container_name: dac-ipfs-cluster
+  #   depends_on:
+  #     - ipfs
+  #   ports:
+  #     - "9094:9094"  # REST API
+  #     - "9095:9095"  # Cluster swarm
+  #   volumes:
+  #     - ipfs_cluster_data:/data/ipfs-cluster
+  #   networks:
+  #     - dac-network
+
+volumes:
+  ipfs_data:
+    driver: local
+  ipfs_staging:
+    driver: local
+  # ipfs_cluster_data:
+  #   driver: local
+
+networks:
+  dac-network:
+    driver: bridge
