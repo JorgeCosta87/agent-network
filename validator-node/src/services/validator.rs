@@ -1,8 +1,9 @@
 use anyhow::Result;
-use dac_sdk::{SolanaAdapter, DacClient, types::{NodeType, NodeStatus}};
+use dac_sdk::{SolanaAdapter, DacClient, types::{NodeType, NodeStatus, AgentStatus}};
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use crate::utils::{ValidateComputeNodeMessage, create_ed25519_instruction_with_signature};
 use borsh::BorshSerialize;
 
@@ -168,12 +169,23 @@ impl ValidatorService {
                 NodeStatus::AwaitingValidation, NodeType::Compute).await?;
         for node_info in nodes {
             println!("Compute node awaiting validation: {:?}", node_info.node_pubkey);
-            self.validate_compute_node(&node_info.node_pubkey).await?;
+            if let Err(e) = self.validate_compute_node(&node_info.node_pubkey).await {
+                eprintln!("Failed to validate compute node: {}", e);
+            }
         }
         Ok(())
     }
 
-    pub async fn run_validation_loop(&self) -> Result<()> {
+    pub async fn validate_agents_with_pending_status(&self) -> Result<()> {
+        let agents = self.dac_client.get_all_agents_by_status(AgentStatus::Pending).await?;
+        for agent in agents {
+            println!("Agent awaiting validation: slot_id={}", agent.agent_slot_id);
+            self.validate_agent(&self.validator_pubkey, agent.agent_slot_id).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn run_validation_loop(&self, shutdown: CancellationToken) -> Result<()> {
         // First, validate any nodes that are already awaiting validation
         println!("Validating existing compute nodes awaiting validation...");
         self.validate_compute_nodes_awaiting_validation().await?;
@@ -181,14 +193,14 @@ impl ValidatorService {
         // Setup subscription for new compute nodes
         println!("Starting monitoring for new compute nodes awaiting validation...");
         let (tx, mut rx) = mpsc::channel(1);
-        let handle = self.dac_client.subscribe_to_node_info(
+        let _subscription = self.dac_client.subscribe_to_node_info(
             None,
             Some(NodeType::Compute),
             Some(NodeStatus::AwaitingValidation),
             tx,
         )?;
 
-        println!("Validator node ready. Monitoring for compute nodes to validate...");
+        println!("Monitoring for compute nodes to validate...");
         
         loop {
             tokio::select! {
@@ -202,20 +214,59 @@ impl ValidatorService {
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to validate compute node: {}", e);
-                                    anyhow::bail!("Validation failed: {}", e);
                                 }
                             }
                         }
                         None => {
-                            println!("Subscription channel closed unexpectedly");
-                            handle.abort();
-                            anyhow::bail!("Subscription ended unexpectedly");
+                            //TODO: try to retry the subscription
+                            anyhow::bail!("Compute node subscription ended unexpectedly");
                         }
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    println!("Shutdown signal received. Cleaning up...");
-                    handle.abort();
+                _ = shutdown.cancelled() => {
+                    println!("Compute node validation loop shutting down...");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    pub async fn run_agent_validation_loop(&self, shutdown: CancellationToken) -> Result<()> {
+        println!("Validating existing agents with pending status...");
+        self.validate_agents_with_pending_status().await?;
+        
+        println!("Starting monitoring for new agents with pending status...");
+        let (tx, mut rx) = mpsc::channel(1);
+        let subscription = self.dac_client.subscribe_to_agents(
+            Some(AgentStatus::Pending),
+            tx,
+        );
+
+        println!("Monitoring for agents to validate...");
+        
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Some(agent) => {
+                            println!("Agent awaiting validation: slot_id={}", agent.agent_slot_id);
+                            match self.validate_agent(&self.validator_pubkey, agent.agent_slot_id).await {
+                                Ok(sig) => {
+                                    println!("Successfully validated agent. Transaction: {:?}", sig);
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to validate agent: {}", e);
+                                }
+                            }
+                        }
+                        None => {
+                            anyhow::bail!("Agent subscription ended unexpectedly");
+                        }
+                    }
+                }
+                _ = shutdown.cancelled() => {
+                    println!("Agent validation loop shutting down...");
+                    drop(subscription);
                     return Ok(());
                 }
             }

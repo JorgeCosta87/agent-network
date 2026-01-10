@@ -7,6 +7,7 @@ use anyhow::Result;
 use config::Config;
 use dac_sdk::SolanaAdapter;
 use services::{TeeService, ValidatorService};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,18 +46,56 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     
-    // Run the validation loop (handles Ctrl+C internally)
-    validator_service.run_validation_loop().await?;
 
-    println!("Validator node shut down cleanly.");
+    let shutdown_token = CancellationToken::new();
+    
+    // Spawn compute node validation loop
+    let compute_validation_handle = tokio::spawn({
+        let token = shutdown_token.clone();
+        let service = Arc::clone(&validator_service);
+        async move {
+            if let Err(e) = service.run_validation_loop(token).await {
+                eprintln!("Compute validation loop error: {}", e);
+            }
+        }
+    });
+
+    // Spawn agent validation loop
+    let agent_validation_handle = tokio::spawn({
+        let token = shutdown_token.clone();
+        let service = Arc::clone(&validator_service);
+        async move {
+            if let Err(e) = service.run_agent_validation_loop(token).await {
+                eprintln!("Agent validation loop error: {}", e);
+            }
+        }
+    });
+
+    println!("Validator node ready. Monitoring for compute nodes and agents to validate...");
+    println!("Press Ctrl+C to shutdown.");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("Shutdown signal received. Stopping all validation loops...");
+        }
+        _ = compute_validation_handle => {
+            println!("Compute validation task ended unexpectedly");
+        }
+        _ = agent_validation_handle => {
+            println!("Agent validation task ended unexpectedly");
+        }
+    }
+
+    shutdown_token.cancel();
+    //TODO: need to undersant the best pratices to wait for the tasks to complete
+
+    println!("All services shut down cleanly.");
     Ok(())
 }
 
 async fn startup_checks(config: &Config, solana_adapter: &SolanaAdapter) -> Result<()> {
     let balance = solana_adapter.get_balance(&config.node_pubkey()).await?;
-    println!("Balance: 
-    
-    {} lamports ({} SOL)", balance, balance as f64 / 1_000_000_000.0);
+    println!("Balance: {} lamports ({} SOL)", balance, balance as f64 / 1_000_000_000.0);
     
     if balance < 1_000_000 {
         anyhow::bail!(
