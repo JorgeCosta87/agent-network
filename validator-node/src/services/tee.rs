@@ -46,4 +46,12 @@ impl TeeService {
     pub fn verify_attestation(&self, _quote: &[u8], _cert_chain: &[u8]) -> Result<bool> {
         Ok(true)
     }
+
+    /// In real SGX mode, this would retrieve the keypair from the enclave
+    pub fn get_signing_keypair(&self) -> Result<solana_sdk::signature::Keypair> {
+        // In mock mode, use fixed keypair bytes
+        // In real SGX mode, this would retrieve from enclave
+        let secret_bytes = [1u8; 32];
+        Ok(solana_sdk::signature::Keypair::new_from_array(secret_bytes))
+    }
 }

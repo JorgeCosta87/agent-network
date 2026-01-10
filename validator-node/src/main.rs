@@ -1,5 +1,6 @@
 mod config;
 mod services;
+mod utils;
 
 use std::sync::Arc;
 use anyhow::Result;
@@ -30,6 +31,8 @@ async fn main() -> Result<()> {
     let validator_service = Arc::new(ValidatorService::new(
         Arc::clone(&solana_adapter),
         Arc::clone(&tee_service),
+        config.network_authority,
+        config.node_pubkey(),
     ));
 
     let node_pubkey = config.node_pubkey();
@@ -38,21 +41,22 @@ async fn main() -> Result<()> {
     let is_validator_claimed = validator_service.handle_validator_claim(&node_pubkey).await?;
     
     if !is_validator_claimed {
-        println!("Validator node not claimed. Exiting. Please register the node first.");
+        println!("Validator node not claimed. Exiting. Please register the node on chain first.");
         return Ok(());
     }
     
-    println!("Validator node ready. Waiting for tasks...");
+    // Run the validation loop (handles Ctrl+C internally)
+    validator_service.run_validation_loop().await?;
 
-    tokio::signal::ctrl_c().await?;
-    println!("Shutting down...");
-
+    println!("Validator node shut down cleanly.");
     Ok(())
 }
 
 async fn startup_checks(config: &Config, solana_adapter: &SolanaAdapter) -> Result<()> {
     let balance = solana_adapter.get_balance(&config.node_pubkey()).await?;
-    println!("Balance: {} lamports ({} SOL)", balance, balance as f64 / 1_000_000_000.0);
+    println!("Balance: 
+    
+    {} lamports ({} SOL)", balance, balance as f64 / 1_000_000_000.0);
     
     if balance < 1_000_000 {
         anyhow::bail!(

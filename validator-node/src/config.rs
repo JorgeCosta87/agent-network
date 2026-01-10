@@ -9,6 +9,7 @@ pub struct Config {
     pub rpc_url: String,
     pub rpc_websocket_url: String,
     pub node_keypair: Keypair,
+    pub network_authority: Pubkey,
 }
 
 impl Config {
@@ -26,12 +27,19 @@ impl Config {
         let keypair_path = PathBuf::from(keypair_path);
 
         let keypair = Self::load_keypair_from_file(&keypair_path)
-            .with_context(|| format!("Failed to load keypair from {}", keypair_path.display()))?;
+            .context(format!("Failed to load keypair from {}", keypair_path.display()))?;
+
+        let network_authority = std::env::var("NETWORK_AUTHORITY")
+            .context("NETWORK_AUTHORITY environment variable not set")?;
+        let network_authority = network_authority.parse::<Pubkey>()
+            .map_err(|_| anyhow::anyhow!("Failed to parse NETWORK_AUTHORITY as Pubkey"))?;
+
 
         Ok(Config {
             rpc_url,
             rpc_websocket_url,
             node_keypair: keypair,
+            network_authority,
         })
     }
 
