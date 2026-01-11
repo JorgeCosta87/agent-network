@@ -11,12 +11,10 @@ use dac_client::{
         GOAL_DISCRIMINATOR,
     },
     instructions::{
-        ClaimValidatorNodeBuilder, RegisterNodeBuilder, 
-        SubmitTaskResultBuilder, ClaimComputeNodeBuilder,
-        ClaimTaskBuilder, CreateAgentBuilder, CreateGoalBuilder,
-        SetGoalBuilder, ContributeToGoalBuilder, WithdrawFromGoalBuilder,
-        SubmitTaskValidationBuilder, ValidateAgentBuilder,
-        ValidateComputeNodeBuilder, InitializeNetworkBuilder,
+        ClaimPublicNodeBuilder, ClaimConfidentialNodeBuilder, RegisterNodeBuilder, 
+        SubmitTaskResultBuilder, ClaimTaskBuilder, CreateAgentBuilder, CreateGoalBuilder,
+        SubmitPublicTaskValidationBuilder, SubmitConfidentialTaskValidationBuilder, ValidateAgentBuilder,
+        ValidatePublicNodeBuilder, InitializeNetworkBuilder,
         UpdateNetworkConfigBuilder,
     },
     types::{NodeType, TaskStatus, AgentStatus, GoalStatus, NodeStatus},
@@ -90,7 +88,7 @@ impl DacClient {
             .await
     }
 
-    pub async fn get_all_compute_node_by_status_and_type(&self, status: NodeStatus, node_type: NodeType) -> Result<impl Iterator<Item = NodeInfo>> {
+    pub async fn get_all_nodes_by_status_and_type(&self, status: NodeStatus, node_type: NodeType) -> Result<impl Iterator<Item = NodeInfo>> {
         let filters = vec![
             AccountFilter {
                 offset: 0,
@@ -159,6 +157,59 @@ impl DacClient {
             .await
     }
 
+    pub async fn get_task_by_slot(&self, task_slot_id: u64) -> Result<Task> {
+        let network_config = self.derive_network_config_pda()?;
+        self.get_task(&network_config, task_slot_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Task {} not found", task_slot_id))
+    }
+
+
+    async fn find_goal_by_task_slot(
+        &self,
+        network_config: &Pubkey,
+        task_slot_id: u64,
+    ) -> Result<Goal> {
+        let task_pubkey = self.derive_task_pda(network_config, task_slot_id)?;
+        
+        let goals = self.adapter.get_program_accounts(
+            &DAC_ID,
+            vec![
+                AccountFilter {
+                    offset: 0,
+                    value: GOAL_DISCRIMINATOR.to_vec(),
+                },
+                AccountFilter {
+                    offset: 80, // discriminator 8 + goal_slot_id 8 + owner 32 + agent 32
+                    value: task_pubkey.to_bytes().to_vec(),
+                },
+            ],
+            Goal::from_bytes,
+        ).await?;
+        
+        if goals.is_empty() {
+            anyhow::bail!("Goal for task {} not found", task_slot_id);
+        }
+        
+        if goals.len() > 1 {
+            eprintln!("Warning: Multiple goals found for task {} (unexpected)", task_slot_id);
+        }
+        
+        let (_, goal) = goals.into_iter().next().unwrap();
+        Ok(goal)
+    }
+
+    pub async fn get_goal_by_task_slot(&self, task_slot_id: u64) -> Result<(Goal, Pubkey)> {
+        let network_config = self.derive_network_config_pda()?;
+        let goal = self.find_goal_by_task_slot(&network_config, task_slot_id).await?;
+        let goal_pda = self.derive_goal_pda(&network_config, goal.goal_slot_id)?;
+        Ok((goal, goal_pda))
+    }
+
+    pub async fn get_agent_by_pubkey(&self, agent_pubkey: Pubkey) -> Result<Agent> {
+        self.adapter.get_account(&agent_pubkey, Agent::from_bytes).await?
+            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_pubkey))
+    }
+
     pub async fn register_node(
         &self,
         node_pubkey: &Pubkey,
@@ -183,17 +234,17 @@ impl DacClient {
             .await
     }
 
-    pub async fn claim_validator_node(
+    pub async fn claim_confidential_node(
         &self,
-        validator_node_pubkey: &Pubkey,
+        confidential_node_pubkey: &Pubkey,
         code_measurement: [u8; 32],
         tee_signing_pubkey: Pubkey,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
-        let node_info = self.derive_node_info_pda(validator_node_pubkey)?;
+        let node_info = self.derive_node_info_pda(confidential_node_pubkey)?;
 
-        let instruction = ClaimValidatorNodeBuilder::new()
-            .validator_node(*validator_node_pubkey)
+        let instruction = ClaimConfidentialNodeBuilder::new()
+            .confidential_node(*confidential_node_pubkey)
             .network_config(network_config)
             .node_info(node_info)
             .code_measurement(code_measurement)
@@ -207,12 +258,12 @@ impl DacClient {
 
     pub async fn initialize_network(
         &self,
-        authority: &Pubkey,
         cid_config: String,
         allocate_goals: u64,
         allocate_tasks: u64,
         approved_code_measurements: Vec<dac_client::types::CodeMeasurement>,
     ) -> Result<String> {
+        let authority = self.get_authority()?;
         let network_config = pdas::derive_network_config_pda(authority)?.0;
 
         let instruction = InitializeNetworkBuilder::new()
@@ -232,10 +283,10 @@ impl DacClient {
 
     pub async fn update_network_config(
         &self,
-        authority: &Pubkey,
         cid_config: Option<String>,
         new_code_measurement: Option<dac_client::types::CodeMeasurement>,
     ) -> Result<String> {
+        let authority = self.get_authority()?;
         let network_config = pdas::derive_network_config_pda(authority)?.0;
 
         let mut builder = UpdateNetworkConfigBuilder::new();
@@ -284,7 +335,8 @@ impl DacClient {
     pub async fn create_goal(
         &self,
         owner: &Pubkey,
-        is_public: bool,
+        is_owned: bool,
+        is_confidential: bool,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let network_config_account = self.get_network_config().await?
@@ -296,7 +348,8 @@ impl DacClient {
             .network_config(network_config)
             .goal(goal)
             .system_program(solana_sdk::pubkey!("11111111111111111111111111111111"))
-            .is_public(is_public)
+            .is_owned(is_owned)
+            .is_confidential(is_confidential)
             .instruction();
 
         self.adapter
@@ -304,52 +357,17 @@ impl DacClient {
             .await
     }
 
-    pub async fn set_goal(
+
+    pub async fn claim_public_node(
         &self,
-        owner: &Pubkey,
-        goal_slot_id: u64,
-        agent_slot_id: u64,
-        task_slot_id: u64,
-        specification_cid: String,
-        max_iterations: u64,
-        initial_deposit: u64,
-    ) -> Result<String> {
-        let network_config = self.derive_network_config_pda()?;
-        let goal = self.derive_goal_pda(&network_config, goal_slot_id)?;
-        let vault = self.derive_goal_vault_pda(&goal)?;
-        let owner_contribution = self.derive_contribution_pda(&goal, owner)?;
-        let task = self.derive_task_pda(&network_config, task_slot_id)?;
-        let agent = self.derive_agent_pda(&network_config, agent_slot_id)?;
-
-        let instruction = SetGoalBuilder::new()
-            .owner(*owner)
-            .goal(goal)
-            .vault(vault)
-            .owner_contribution(owner_contribution)
-            .task(task)
-            .agent(agent)
-            .network_config(network_config)
-            .system_program(solana_sdk::pubkey!("11111111111111111111111111111111"))
-            .specification_cid(specification_cid)
-            .max_iterations(max_iterations)
-            .initial_deposit(initial_deposit)
-            .instruction();
-
-        self.adapter
-            .send_and_confirm_transaction(&[instruction])
-            .await
-    }
-
-    pub async fn claim_compute_node(
-        &self,
-        compute_node_pubkey: &Pubkey,
+        public_node_pubkey: &Pubkey,
         node_info_cid: String,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
-        let node_info = self.derive_node_info_pda(compute_node_pubkey)?;
+        let node_info = self.derive_node_info_pda(public_node_pubkey)?;
 
-        let instruction = ClaimComputeNodeBuilder::new()
-            .compute_node(*compute_node_pubkey)
+        let instruction = ClaimPublicNodeBuilder::new()
+            .node(*public_node_pubkey)
             .network_config(network_config)
             .node_info(node_info)
             .node_info_cid(node_info_cid)
@@ -362,23 +380,25 @@ impl DacClient {
 
     pub async fn claim_task(
         &self,
-        compute_node_pubkey: &Pubkey,
-        goal_slot_id: u64,
         task_slot_id: u64,
         max_task_cost: u64,
     ) -> Result<String> {
+        let node_pubkey = self.adapter.payer_pubkey();
         let network_config = self.derive_network_config_pda()?;
-        let compute_node_info = self.derive_node_info_pda(compute_node_pubkey)?;
+        let goal = self.find_goal_by_task_slot(&network_config, task_slot_id).await?;
+        let goal_slot_id = goal.goal_slot_id;
+
+        let node_info = self.derive_node_info_pda(&node_pubkey)?;
         let goal = self.derive_goal_pda(&network_config, goal_slot_id)?;
         let vault = self.derive_goal_vault_pda(&goal)?;
         let task = self.derive_task_pda(&network_config, task_slot_id)?;
 
         let instruction = ClaimTaskBuilder::new()
-            .compute_node(*compute_node_pubkey)
+            .compute_node(node_pubkey)
             .task(task)
             .goal(goal)
             .vault(vault)
-            .compute_node_info(compute_node_info)
+            .compute_node_info(node_info)
             .network_config(network_config)
             .max_task_cost(max_task_cost)
             .instruction();
@@ -388,71 +408,20 @@ impl DacClient {
             .await
     }
 
-    pub async fn contribute_to_goal(
-        &self,
-        contributor: &Pubkey,
-        goal_slot_id: u64,
-        deposit_amount: u64,
-    ) -> Result<String> {
-        let network_config = self.derive_network_config_pda()?;
-        let goal = self.derive_goal_pda(&network_config, goal_slot_id)?;
-        let vault = self.derive_goal_vault_pda(&goal)?;
-        let contribution = self.derive_contribution_pda(&goal, contributor)?;
-
-        let instruction = ContributeToGoalBuilder::new()
-            .contributor(*contributor)
-            .goal(goal)
-            .vault(vault)
-            .contribution(contribution)
-            .network_config(network_config)
-            .system_program(solana_sdk::pubkey!("11111111111111111111111111111111"))
-            .deposit_amount(deposit_amount)
-            .instruction();
-
-        self.adapter
-            .send_and_confirm_transaction(&[instruction])
-            .await
-    }
-
-    pub async fn withdraw_from_goal(
-        &self,
-        contributor: &Pubkey,
-        goal_slot_id: u64,
-        shares_to_burn: u64,
-    ) -> Result<String> {
-        let network_config = self.derive_network_config_pda()?;
-        let goal = self.derive_goal_pda(&network_config, goal_slot_id)?;
-        let vault = self.derive_goal_vault_pda(&goal)?;
-        let contribution = self.derive_contribution_pda(&goal, contributor)?;
-
-        let instruction = WithdrawFromGoalBuilder::new()
-            .contributor(*contributor)
-            .goal(goal)
-            .vault(vault)
-            .contribution(contribution)
-            .network_config(network_config)
-            .system_program(solana_sdk::pubkey!("11111111111111111111111111111111"))
-            .shares_to_burn(shares_to_burn)
-            .instruction();
-
-        self.adapter
-            .send_and_confirm_transaction(&[instruction])
-            .await
-    }
 
     pub async fn submit_task_result(
         &self,
-        compute_node_pubkey: &Pubkey,
         task_slot_id: u64,
         input_cid: String,
         output_cid: String,
         next_input_cid: String,
     ) -> Result<String> {
+        let node_pubkey = self.adapter.payer_pubkey();
         let network_config = self.derive_network_config_pda()?;
         let task = self.derive_task_pda(&network_config, task_slot_id)?;
 
         let instruction = SubmitTaskResultBuilder::new()
-            .compute_node(*compute_node_pubkey)
+            .compute_node(node_pubkey)
             .network_config(network_config)
             .task(task)
             .input_cid(input_cid)
@@ -465,7 +434,7 @@ impl DacClient {
             .await
     }
 
-    pub async fn submit_task_validation(
+    pub async fn submit_confidential_task_validation(
         &self,
         validator_pubkey: &Pubkey,
         goal_slot_id: u64,
@@ -480,26 +449,67 @@ impl DacClient {
         
         let task_account = self.get_task(&network_config, task_slot_id).await?
             .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
-        let compute_node_pubkey = task_account.compute_node
-            .ok_or_else(|| anyhow::anyhow!("Task has no assigned compute node"))?;
-        let compute_node_info = self.derive_node_info_pda(&compute_node_pubkey)?;
-        let node_treasury = self.derive_node_treasury_pda(&compute_node_info)?;
+        let node_pubkey = task_account.compute_node
+            .ok_or_else(|| anyhow::anyhow!("Task has no assigned node"))?;
+        let node_info = self.derive_node_info_pda(&node_pubkey)?;
+        let node_treasury = self.derive_node_treasury_pda(&node_info)?;
 
-        let instruction = SubmitTaskValidationBuilder::new()
-            .validator(*validator_pubkey)
+        let instruction = SubmitConfidentialTaskValidationBuilder::new()
+            .node_validating(*validator_pubkey)
             .goal(goal)
             .vault(vault)
             .task(task)
-            .compute_node_info(compute_node_info)
+            .node_info(node_info)
             .node_treasury(node_treasury)
             .validator_node_info(validator_node_info)
             .network_config(network_config)
             .instruction_sysvar(solana_sdk::pubkey!("Sysvar1nstructions1111111111111111111111111"))
-            .system_program(solana_sdk::pubkey!("11111111111111111111111111111111"))
             .instruction();
 
         self.adapter
             .send_and_confirm_transaction(&[ed25519_instruction, instruction])
+            .await
+    }
+
+    pub async fn submit_public_task_validation(
+        &self,
+        validator_pubkey: &Pubkey,
+        goal_slot_id: u64,
+        task_slot_id: u64,
+        payment_amount: u64,
+        approved: bool,
+        goal_completed: bool,
+    ) -> Result<String> {
+        let network_config = self.derive_network_config_pda()?;
+        let validator_node_info = self.derive_node_info_pda(validator_pubkey)?;
+        let goal = self.derive_goal_pda(&network_config, goal_slot_id)?;
+        let vault = self.derive_goal_vault_pda(&goal)?;
+        let task = self.derive_task_pda(&network_config, task_slot_id)?;
+        
+        let task_account = self.get_task(&network_config, task_slot_id).await?
+            .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
+        let node_pubkey = task_account.compute_node
+            .ok_or_else(|| anyhow::anyhow!("Task has no assigned node"))?;
+        let node_info = self.derive_node_info_pda(&node_pubkey)?;
+        let node_treasury = self.derive_node_treasury_pda(&node_info)?;
+
+        let instruction = SubmitPublicTaskValidationBuilder::new()
+            .node_validating(*validator_pubkey)
+            .goal(goal)
+            .vault(vault)
+            .task(task)
+            .node_info(node_info)
+            .node_treasury(node_treasury)
+            .validator_node_info(validator_node_info)
+            .network_config(network_config)
+            .instruction_sysvar(solana_sdk::pubkey!("Sysvar1nstructions1111111111111111111111111"))
+            .payment_amount(payment_amount)
+            .approved(approved)
+            .goal_completed(goal_completed)
+            .instruction();
+
+        self.adapter
+            .send_and_confirm_transaction(&[instruction])
             .await
     }
 
@@ -510,10 +520,12 @@ impl DacClient {
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let agent = self.derive_agent_pda(&network_config, agent_slot_id)?;
+        let node_info = self.derive_node_info_pda(validator_pubkey)?;
 
         let instruction = ValidateAgentBuilder::new()
-            .validator(*validator_pubkey)
+            .node(*validator_pubkey)
             .agent(agent)
+            .node_info(node_info)
             .network_config(network_config)
             .instruction();
 
@@ -522,27 +534,26 @@ impl DacClient {
             .await
     }
 
-    pub async fn validate_compute_node(
+    pub async fn validate_public_node(
         &self,
         validator_pubkey: &Pubkey,
-        compute_node_pubkey: &Pubkey,
-        ed25519_instruction: solana_sdk::instruction::Instruction,
+        public_node_pubkey: &Pubkey,
+        approved: bool,
     ) -> Result<String> {
         let network_config = self.derive_network_config_pda()?;
         let validator_node_info = self.derive_node_info_pda(validator_pubkey)?;
-        let compute_node_info = self.derive_node_info_pda(compute_node_pubkey)?;
+        let public_node_info = self.derive_node_info_pda(public_node_pubkey)?;
 
-        let validate_instruction = ValidateComputeNodeBuilder::new()
-            .validator_node_pubkey(*validator_pubkey)
-            .validator_node_info(validator_node_info)
-            .compute_node_info(compute_node_info)
+        let validate_instruction = ValidatePublicNodeBuilder::new()
+            .node_validating(*validator_pubkey)
             .network_config(network_config)
-            .instruction_sysvar(solana_sdk::pubkey!("Sysvar1nstructions1111111111111111111111111"))
+            .node_validating_info(validator_node_info)
+            .node_info(public_node_info)
+            .approved(approved)
             .instruction();
 
-        // Ed25519 instruction must come before validate_compute_node instruction
         self.adapter
-            .send_and_confirm_transaction(&[ed25519_instruction, validate_instruction])
+            .send_and_confirm_transaction(&[validate_instruction])
             .await
     }
 
@@ -670,104 +681,5 @@ impl DacClient {
             tx,
             "goals",
         )
-    }
-
-    pub async fn get_task_by_slot(&self, network_authority: &Pubkey, task_slot_id: u64) -> Result<Task> {
-        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
-        self.get_task(&network_config, task_slot_id).await?
-            .ok_or_else(|| anyhow::anyhow!("Task {} not found", task_slot_id))
-    }
-
-
-    pub async fn get_goal_by_task_slot(&self, network_authority: &Pubkey, task_slot_id: u64) -> Result<(Goal, Pubkey)> {
-        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
-        
-        let task_pubkey = self.derive_task_pda(&network_config, task_slot_id)?;
-        
-        let goals = self.adapter.get_program_accounts(
-            &DAC_ID,
-            vec![
-                AccountFilter {
-                    offset: 0,
-                    value: GOAL_DISCRIMINATOR.to_vec(),
-                },
-                AccountFilter {
-                    offset: 80, // discriminator 8 + goal_slot_id 8 + owner 32 + agent 32
-                    value: task_pubkey.to_bytes().to_vec(),
-                },
-            ],
-            Goal::from_bytes,
-        ).await?;
-        
-        // Should find exactly one goal
-        if goals.len() == 1 {
-            let (goal_pda, goal) = goals.into_iter().next().unwrap();
-            Ok((goal, goal_pda))
-        } else if goals.is_empty() {
-            anyhow::bail!("Goal for task {} not found", task_slot_id)
-        } else {
-            anyhow::bail!("Multiple goals found for task {} (unexpected)", task_slot_id)
-        }
-    }
-
-    pub async fn get_agent_by_pubkey(&self, agent_pubkey: Pubkey) -> Result<Agent> {
-        self.adapter.get_account(&agent_pubkey, Agent::from_bytes).await?
-            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_pubkey))
-    }
-
-    pub async fn claim_task_simple(
-        &self,
-        network_authority: &Pubkey,
-        task_slot_id: u64,
-        max_task_cost: u64,
-    ) -> Result<String> {
-        let compute_node_pubkey = self.adapter.payer_pubkey();
-        let network_config = pdas::derive_network_config_pda(network_authority)?.0;
-        
-        // Derive task PDA to filter by
-        let task_pda = pdas::derive_task_pda(&network_config, task_slot_id)?.0;
-        
-        // Filter goals by task pubkey (offset: discriminator 8 + goal_slot_id 8 + owner 32 + agent 32 = 80)
-        let goals = self.adapter.get_program_accounts(
-            &DAC_ID,
-            vec![
-                AccountFilter {
-                    offset: 0,
-                    value: GOAL_DISCRIMINATOR.to_vec(),
-                },
-                AccountFilter {
-                    offset: 80, // task field offset in Goal struct
-                    value: task_pda.to_bytes().to_vec(),
-                },
-            ],
-            Goal::from_bytes,
-        ).await?;
-        
-        // Should find exactly one goal
-        if goals.is_empty() {
-            anyhow::bail!("Goal for task {} not found", task_slot_id);
-        }
-        
-        if goals.len() > 1 {
-            eprintln!("Warning: Multiple goals found for task {} (unexpected)", task_slot_id);
-        }
-        
-        let (_, goal) = goals.into_iter().next().unwrap();
-        
-        let goal_slot_id = goal.goal_slot_id;
-        
-        self.claim_task(&compute_node_pubkey, goal_slot_id, task_slot_id, max_task_cost).await
-    }
-
-    /// Submit task result (simplified signature for compute nodes)
-    pub async fn submit_task_result_simple(
-        &self,
-        task_slot_id: u64,
-        input_cid: String,
-        output_cid: String,
-        next_input_cid: String,
-    ) -> Result<String> {
-        let compute_node_pubkey = self.adapter.payer_pubkey();
-        self.submit_task_result(&compute_node_pubkey, task_slot_id, input_cid, output_cid, next_input_cid).await
     }
 }
