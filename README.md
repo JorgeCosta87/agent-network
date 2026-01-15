@@ -4,78 +4,47 @@ Decentralized network for verifiable AI agent execution on Solana.
 
 ## Quick Start
 
-### 1. Start IPFS
-
 ```bash
+# 1. Start IPFS
 make ipfs-up
-```
 
-### 2. Configure Environment
-
-```bash
+# 2. Configure environment
 cp .env.example .env
-# Edit .env with your configuration
+
+# 3. Generate keypairs (from project root)
+./scripts/generate_keypair.sh [num_public_nodes] [num_confidential_nodes]
+# Example: ./scripts/generate_keypair.sh 2 1
+
+# 4. Run public node
+cd agent-network
+cargo run --bin public-node ../keypairs/public-node-1-keypair.json
+
+# 5. Run confidential node
+cd confidential-node && cargo run
 ```
 
-### 3. Run Validator Node
+**Note**: Paths are resolved relative to your current working directory. Use `../keypairs/...` from `agent-network/` or `keypairs/...` from project root.
+
+## Commands
 
 ```bash
-make validator
+make help          # Show all commands
+make ipfs-up       # Start IPFS
+make ipfs-down     # Stop IPFS
+make check         # Check code
+make build         # Build binaries
+make test          # Run tests
 ```
 
-### 4. Run Compute Node (in another terminal)
-
-```bash
-make compute
-```
-
-## Docker Commands
-
-```bash
-make help           # Show all commands
-make ipfs-up        # Start IPFS
-make ipfs-status    # Check IPFS status
-make ipfs-logs      # View logs
-make ipfs-test      # Test connection
-make ipfs-down      # Stop IPFS
-make ipfs-clean     # Remove all data
-```
-
-## Development
-
-```bash
-make check      # Check code
-make build      # Build binaries
-make test       # Run tests
-make clean      # Clean artifacts
-```
-
-## Architecture
-
-```
-┌──────────────┐
-│ Validator    │──┐
-│ Node (TEE)   │  │
-└──────────────┘  │
-                  │    ┌──────────┐      ┌──────────┐
-┌──────────────┐  ├───▶│   IPFS   │◀────▶│  Solana  │
-│  Compute     │  │    │  Docker  │      │  Network │
-│  Node (LLM)  │──┘    └──────────┘      └──────────┘
-└──────────────┘
-
-```
 
 ## Components
 
-- **validator-node**: Validates compute nodes, agents, and tasks (TEE-enabled)
-- **compute-node**: Executes LLM tasks
+- **public-node**: Validates and executes tasks (public execution)
+- **confidential-node**: Validates and executes tasks with TEE protection (confidential execution)
 - **dac-sdk**: Solana program client library
 - **ipfs-adapter**: IPFS client wrapper
 - **solana-adapter**: Solana RPC wrapper
 
-## Documentation
+## Docs
 
-- [Docker Setup](README_DOCKER.md) - IPFS Docker configuration
-- [Design](../docs/design.md) - System design
-- [IPFS Architecture](docs/IPFS_ARCHITECTURE.md) - IPFS data flow
-- [Configs](../docs/configs.yaml) - Configuration schemas
+- [Docker Setup](README_DOCKER.md) | [Design](../docs/design.md) | [IPFS Architecture](docs/IPFS_ARCHITECTURE.md) | [Configs](../docs/configs.yaml)
