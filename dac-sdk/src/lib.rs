@@ -8,3 +8,9 @@ pub use solana_adapter::{SolanaAdapter, AccountFilter};
 pub use dac_client::types;
 pub use dac_client::accounts;
 pub use dac_client::programs::DAC_ID;
+
+// Re-export common types
+pub use dac_common;
+
+// Re-export IPFS adapter
+pub use ipfs_adapter;

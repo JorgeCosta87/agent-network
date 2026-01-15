@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use base64::Engine;
+use tokio_util::sync::CancellationToken;
 
 use crate::types::AccountFilter;
 
@@ -187,6 +188,7 @@ impl SolanaAdapter {
         filters: Vec<AccountFilter>,
         deserialize_fn: F,
         tx: mpsc::Sender<T>,
+        cancel_token: CancellationToken,
         error_msg: &'static str,
     ) -> tokio::task::JoinHandle<()>
     where
@@ -227,18 +229,31 @@ impl SolanaAdapter {
                 }
             };
 
-            while let Some(account) = stream.next().await {
-                if let solana_account_decoder::UiAccountData::Binary(data_str, _) =
-                    &account.value.account.data
-                {
-                    if let Ok(decoded_bytes) =
-                        base64::engine::general_purpose::STANDARD.decode(data_str)
-                    {
-                        if let Ok(item) = deserialize_fn(&decoded_bytes) {
-                            if tx.send(item).await.is_err() {
-                                println!("Receiver dropped, stopping {} watch", error_msg);
-                                break;
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        println!("Cancellation requested, stopping {} watch", error_msg);
+                        break;
+                    }
+                    account = stream.next() => {
+                        if let Some(account) = account {
+                            if let solana_account_decoder::UiAccountData::Binary(data_str, _) =
+                                &account.value.account.data
+                            {
+                                if let Ok(decoded_bytes) =
+                                    base64::engine::general_purpose::STANDARD.decode(data_str)
+                                {
+                                    if let Ok(item) = deserialize_fn(&decoded_bytes) {
+                                        if tx.send(item).await.is_err() {
+                                            println!("Receiver dropped, stopping {} watch", error_msg);
+                                            break;
+                                        }
+                                    }
+                                }
                             }
+                        } else {
+                            println!("Stream ended, stopping {} watch", error_msg);
+                            break;
                         }
                     }
                 }
