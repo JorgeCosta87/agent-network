@@ -1,0 +1,23 @@
+[package]
+name = "public-node"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "public-node"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+solana-sdk = { workspace = true }
+dac-sdk = { path = "../dac-sdk" }
+dac-common = { path = "../dac-common" }
+ipfs-adapter = { path = "../ipfs-adapter" }
+dac-client = { path = "../../clients/rust" }
+dotenvy = "0.15"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+num_cpus = "1.16"
